@@ -2,6 +2,7 @@ import { Collection, CommandInteraction, AutocompleteInteraction, REST, Routes, 
 import fs from "fs/promises";
 import path from "path";
 import { clientId, guildId, token } from "../config";
+import { ErrorHandler } from "../Utils/ErrorHandler";
 
 export default class SlashCommandHandler {
   public cache = new Collection<string, any>();
@@ -22,48 +23,59 @@ export default class SlashCommandHandler {
 
   listen(client: Client) {
     client.on("interactionCreate", async (interaction: Interaction) => {
-      if (interaction.isChatInputCommand()) {
-        await this.handleInteraction(interaction);
-      }
-      // Обработка кнопок
-      if (interaction.isButton()) {
-        const handler = (client as any).interactions.getButton(interaction.customId);
-        if (handler && typeof handler.run === "function") {
-          await handler.run(interaction);
+      try {
+        if (interaction.isChatInputCommand()) {
+          await this.handleInteraction(interaction);
         }
-      }
-      // Обработка селект-меню
-      if (interaction.isStringSelectMenu()) {
-        console.log(`[DEBUG] Received StringSelectMenu interaction: ${interaction.customId}`);
-        const handler = (client as any).interactions.getMenu(interaction.customId);
-        if (handler && typeof handler.run === "function") {
-          console.log(`[DEBUG] Found handler for menu ${interaction.customId}, executing...`);
-          await handler.run(interaction);
-        } else {
-          console.log(`[DEBUG] No handler found for menu ${interaction.customId}`);
-          console.log(`[DEBUG] Available menu handlers: ${Array.from((client as any).interactions.menus.keys()).join(', ')}`);
+        else if (interaction.isButton()) {
+          const handler = (client as any).interactions.getButton(interaction.customId);
+          if (handler && typeof handler.run === "function") {
+            try {
+              await handler.run(interaction);
+            } catch (buttonError) {
+              ErrorHandler.logError(`Button Handler: ${interaction.customId}`, buttonError);
+              await ErrorHandler.safeReply(interaction, "Произошла ошибка при обработке кнопки.");
+            }
+          }
         }
-      }
-      // Обработка модальных окон
-      if (interaction.isModalSubmit()) {
-        const handler = (client as any).interactions.getModal(interaction.customId);
-        if (handler && typeof handler.run === "function") {
-          await handler.run(interaction);
+        else if (interaction.isStringSelectMenu()) {
+          const handler = (client as any).interactions.getMenu(interaction.customId);
+          if (handler && typeof handler.run === "function") {
+            try {
+              await handler.run(interaction);
+            } catch (menuError) {
+              ErrorHandler.logError(`Menu Handler: ${interaction.customId}`, menuError);
+              await ErrorHandler.safeReply(interaction, "Произошла ошибка при обработке меню.");
+            }
+          }
         }
+        else if (interaction.isModalSubmit()) {
+          const handler = (client as any).interactions.getModal(interaction.customId);
+          if (handler && typeof handler.run === "function") {
+            try {
+              await handler.run(interaction);
+            } catch (modalError) {
+              ErrorHandler.logError(`Modal Handler: ${interaction.customId}`, modalError);
+              await ErrorHandler.safeReply(interaction, "Произошла ошибка при обработке формы.");
+            }
+          }
+        }
+      } catch (error) {
+        ErrorHandler.logError("Global Interaction Handler", error);
       }
     });
   }
 
   async registerCommands() {
     const rest = new REST({ version: "10" }).setToken(token);
-    const commandsData = Array.from(this.cache.values()).map(cmd => cmd.data.toJSON());
+    const commandsData = Array.from(this.cache.values()).map((cmd: any) => cmd.data.toJSON());
     try {
       await rest.put(
         Routes.applicationGuildCommands(clientId, guildId),
         { body: commandsData }
       );
     } catch (error) {
-      // Ошибка при регистрации команд
+      ErrorHandler.logError("Command Registration", error);
     }
   }
 
@@ -95,20 +107,12 @@ export default class SlashCommandHandler {
           await command.run(interaction);
         }
       } catch (err) {
-        console.error('Error executing command:', err);
-        try {
-          // Проверяем, было ли взаимодействие уже отвечено
-          if (interaction.replied || interaction.deferred) {
-            await interaction.followUp({ content: "Произошла ошибка при выполнении команды.", ephemeral: true });
-          } else {
-            await interaction.reply({ content: "Произошла ошибка при выполнении команды.", ephemeral: true });
-          }
-        } catch (replyError) {
-          console.error('Error sending error response:', replyError);
-        }
+        await ErrorHandler.handleCommandError(interaction, err, interaction.commandName);
       }
     }
   }
+
+  // Removed safeReply in favor of centralized ErrorHandler.safeReply
 
   async handleAutocomplete(interaction: AutocompleteInteraction) {
     const command = this.get(interaction.commandName);

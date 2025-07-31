@@ -1,10 +1,8 @@
 import { ButtonInteraction } from "discord.js";
 
 export default {
-  data: {
-    name: "leaderboard_first"
-  },
-  async execute(interaction: ButtonInteraction) {
+  customId: "leaderboard_first",
+  async run(interaction: ButtonInteraction) {
     await interaction.deferUpdate();
 
     try {

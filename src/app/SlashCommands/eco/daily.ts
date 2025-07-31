@@ -21,18 +21,27 @@ function formatTime(ms: number): string {
   return `**${hours}** ч. **${minutes}** мин. **${seconds}** сек.`;
 }
 
+// Constants for optimization
+const COOLDOWN = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+const XP_AMOUNT = 200; // Fixed XP amount for daily reward
+
 export default {
   data: new SlashCommandBuilder()
     .setName("daily")
-    .setDescription("Получить ежедневную награду"),
+    .setDescription("Получить ежедневную награду")
+  ,
+
   async execute(interaction: CommandInteraction) {
     try {
-      // Сразу отправляем сигнал Discord, что мы обрабатываем взаимодействие
-      await interaction.deferReply();
+      // Immediately defer reply to prevent timeout errors
+      await interaction.deferReply().catch(e => {
+        console.error('Failed to defer reply:', e);
+        return; // Exit if we can't defer - interaction may be invalid
+      });
 
       const userId = interaction.user.id;
       const now = new Date();
-      const cooldown = 24 * 60 * 60 * 1000;
+      const cooldown = COOLDOWN;
 
       // Убедиться, что у пользователя есть запись в балансе
       await ensureBalanceEntry(userId);
@@ -90,8 +99,7 @@ export default {
       // Переводим награду из банка пользователю
       await transferFromBank(userId, reward, "coins", TRANSACTION_TYPES.DAILY);
 
-      // Добавляем 200 XP пользователю
-      const XP_AMOUNT = 200;
+      // Добавляем XP пользователю
       const { oldLevel, newLevel } = await addXP(userId, XP_AMOUNT);
 
       // Если пользователь повысил уровень и находится в гильдии, обновляем его роли
@@ -126,8 +134,8 @@ export default {
         embeds: [
           new EmbedBuilder()
             .setTitle('—・Ежедневная награда')
-            .setDescription(`Вы **забрали** свои **${reward}** ${money} монет и получили **+${XP_AMOUNT} XP**!
-— Возращайтесь ${nextTimeFormatted}${levelUpMessage}`)
+            .setDescription(`Вы **забрали** свои **${reward}** ${money} монет!
+— Возращайтесь ${nextTimeFormatted}`)
             .setColor('#2f3136')
             .setThumbnail(interaction.user.displayAvatarURL())
         ],
@@ -135,12 +143,19 @@ export default {
       });
     } catch (error) {
       console.error('Error executing daily command:', error);
-      // Проверяем, что взаимодействие все еще валидно и можем ответить
-      if (interaction.isRepliable()) {
-        try {
-          if (!interaction.deferred) {
-            await interaction.deferReply();
-          }
+
+      try {
+        // Check if interaction is still valid and we can reply
+        if (!interaction.isRepliable()) return;
+
+        // Handle the response based on interaction state
+        if (!interaction.deferred) {
+          try {
+            await interaction.deferReply().catch(() => { }); // Catch and ignore any errors if deferring fails
+          } catch { }
+        }
+
+        if (interaction.deferred && !interaction.replied) {
           await interaction.editReply({
             embeds: [
               new EmbedBuilder()
@@ -148,33 +163,51 @@ export default {
                 .setDescription('Произошла ошибка при получении награды. Пожалуйста, попробуйте позже.')
                 .setColor('#ff0000')
             ]
-          });
-        } catch (replyError) {
-          console.error('Error sending error response:', replyError);
+          }).catch(e => console.error('Failed to edit reply after error:', e));
         }
+      } catch (replyError) {
+        console.error('Error handling error response:', replyError);
       }
     }
   }
 };
 
+// Cache for daily reminders to minimize database hits
+const reminderCache = new Map<string, Date>();
+
 // Обработка кнопки и запуск напоминаний
 export function listenDailyReminders(client: Client) {
+  // Set up button handler
   client.on("interactionCreate", async (interaction) => {
-    if (interaction.isButton() && interaction.customId === "enable_daily_reminder") {
+    if (!interaction.isButton() || interaction.customId !== "enable_daily_reminder") return;
+
+    try {
       const userId = interaction.user.id;
-      // Найти последний daily
-      const daily = await DailyModel.findOne({ UID: userId });
-      let nextNotify = new Date();
-      if (daily && daily.LastDaily) {
-        nextNotify = new Date(daily.LastDaily.getTime() + 24 * 60 * 60 * 1000);
+
+      // Get the next notification time from cache or database
+      let nextNotify: Date;
+
+      if (reminderCache.has(userId)) {
+        nextNotify = reminderCache.get(userId)!;
       } else {
-        nextNotify = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        // Find the last daily reward
+        const daily = await DailyModel.findOne({ UID: userId });
+        nextNotify = daily && daily.LastDaily
+          ? new Date(daily.LastDaily.getTime() + COOLDOWN)
+          : new Date(Date.now() + COOLDOWN);
+
+        // Update the cache
+        reminderCache.set(userId, nextNotify);
       }
+
+      // Update the database
       await ReminderModel.updateOne(
         { userId },
         { $set: { nextNotify } },
         { upsert: true }
       );
+
+      // Update the button UI
       const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId("enable_daily_reminder")
@@ -182,28 +215,67 @@ export function listenDailyReminders(client: Client) {
           .setStyle(ButtonStyle.Secondary)
           .setDisabled(true)
       );
-      await interaction.update({ components: [row] });
-      await interaction.followUp({ content: "Напоминания включены!", ephemeral: true });
+
+      // Safe interaction handling
+      try {
+        await interaction.update({ components: [row] });
+        await interaction.followUp({
+          content: "Напоминания включены! Вы получите уведомление, когда сможете забрать награду.",
+          ephemeral: true
+        });
+      } catch (error) {
+        console.error('Error updating reminder button:', error);
+      }
+    } catch (error) {
+      console.error('Error enabling daily reminder:', error);
+      try {
+        await interaction.followUp({
+          content: "Произошла ошибка при включении напоминаний. Пожалуйста, попробуйте позже.",
+          ephemeral: true
+        });
+      } catch { }
     }
   });
 
-  // Таймер для отправки напоминаний
+  // Optimized reminder check interval - runs every 2 minutes
   setInterval(async () => {
-    const now = new Date();
-    const reminders = await ReminderModel.find({ nextNotify: { $lte: now } });
-    for (const reminder of reminders) {
-      try {
-        const user = await client.users.fetch(reminder.userId);
-        const embed = new EmbedBuilder()
-          .setTitle("—・Напоминание о награде")
-          .setDescription(`<@${user.id}>, Вы **можете** получить **ежедневную** награду`)
-          .setThumbnail(user.displayAvatarURL())
-          .setColor(0x2f3136);
-        await user.send({ embeds: [embed] });
-      } catch { }
-      await ReminderModel.deleteOne({ _id: reminder._id });
+    try {
+      const now = new Date();
+      // Get only the reminders that are due
+      const reminders = await ReminderModel.find({
+        nextNotify: { $lte: now }
+      }).limit(25); // Process in batches to avoid overload
+
+      if (reminders.length === 0) return;
+
+      // Process reminders in parallel for better performance
+      await Promise.all(reminders.map(async (reminder) => {
+        try {
+          // Remove from cache if exists
+          reminderCache.delete(reminder.userId);
+
+          // Fetch user and send notification
+          const user = await client.users.fetch(reminder.userId);
+          const embed = new EmbedBuilder()
+            .setTitle("—・Напоминание о награде")
+            .setDescription(`<@${user.id}>, Вы **можете** получить **ежедневную** награду`)
+            .setThumbnail(user.displayAvatarURL())
+            .setColor(0x2f3136);
+
+          await user.send({ embeds: [embed] });
+
+          // Delete the reminder after sending
+          await ReminderModel.deleteOne({ _id: reminder._id });
+        } catch (error) {
+          // If we can't DM the user or other error, still delete the reminder to avoid spam
+          await ReminderModel.deleteOne({ _id: reminder._id }).catch(() => { });
+          console.error(`Error sending reminder to user ${reminder.userId}:`, error);
+        }
+      }));
+    } catch (error) {
+      console.error('Error processing daily reminders:', error);
     }
-  }, 5 * 60 * 1000);
+  }, 2 * 60 * 1000); // Check every 2 minutes instead of 5
 }
 
 

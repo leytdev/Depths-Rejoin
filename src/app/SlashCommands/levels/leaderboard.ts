@@ -7,23 +7,29 @@ import {
   ButtonStyle,
   StringSelectMenuBuilder,
   StringSelectMenuOptionBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle
 } from 'discord.js';
 import { getLevelLeaderboard, getUserLevel } from '../../../Utils/LevelSystem';
 import { tochka, LEFTLEFT_BUTTON_EMOJI, LEFT_BUTTON_EMOJI, TRASH_BUTTON_EMOJI, RIGHT_BUTTON_EMOJI, RIGHTRIGHT_BUTTON_EMOJI } from '../../../Utils/Ids';
+import { ErrorHandler } from '../../../Utils/ErrorHandler';
+
 export default {
   data: new SlashCommandBuilder()
     .setName('leaderboard')
     .setDescription('Показать таблицу лидеров'),
 
   async execute(interaction: ChatInputCommandInteraction) {
-    await interaction.deferReply();
+    // Immediately defer the reply to avoid timeout issues
+    try {
+      await interaction.deferReply();
+    } catch (deferError) {
+      ErrorHandler.logError('Leaderboard Command Defer', deferError);
+      return; // Exit if we can't defer - interaction may be invalid
+    }
 
     try {
-      // Получаем топ 10 пользователей
-      const leaderboard = await getLevelLeaderboard(10);
+      // Получаем топ 10 пользователей, по умолчанию сортируя по опыту
+      const filterType: 'xp' | 'level' | 'balance' | 'messages' | 'voice' = 'xp';
+      const leaderboard = await getLevelLeaderboard(10, filterType);
       const page = 1;
 
       if (leaderboard.length === 0) {
@@ -71,7 +77,7 @@ export default {
             const balanceEntry = await BalanceModel.findOne({ UID: entry.userId });
             balance = balanceEntry ? balanceEntry.balance : 0;
           } catch (balanceError) {
-            console.error(`Ошибка при получении баланса для ${entry.userId}:`, balanceError);
+            ErrorHandler.logError(`Balance Fetch for ${entry.userId}`, balanceError);
           }
 
           // Формируем строку для пользователя
@@ -92,11 +98,12 @@ export default {
       }));
 
       const embed = new EmbedBuilder()
-        .setTitle('—・Лидеры')
+        .setTitle('—・Лидеры по опыту')
         .setDescription(leaderboardText.join('\n'))
         .setColor('#2f3136')
         .setFooter({ text: `Depths • Страница ${page} • Ваш ранг: #${userRank}` })
-        .setTimestamp();
+        .setTimestamp()
+        .setThumbnail(interaction.user.displayAvatarURL());
 
       // Создаем фильтр (селект-меню)
       const filterRow = new ActionRowBuilder<StringSelectMenuBuilder>()
@@ -126,19 +133,6 @@ export default {
                 .setValue('voice')
                 .setEmoji(tochka),
             ])
-        );
-
-      // Создаем кнопки перехода
-      const navigationRow = new ActionRowBuilder<ButtonBuilder>()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId('leaderboard_my_page')
-            .setLabel('Перейти к себе на странице')
-            .setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder()
-            .setCustomId('leaderboard_goto_page')
-            .setLabel('Перейти на страницу')
-            .setStyle(ButtonStyle.Secondary)
         );
 
       // Создаем кнопки пагинации
@@ -174,13 +168,13 @@ export default {
       await interaction.editReply({
         content: contentText,
         embeds: [embed],
-        components: [filterRow, navigationRow, paginationRow]
+        components: [filterRow, paginationRow]
       });
     } catch (error) {
-      console.error('Error fetching leaderboard:', error);
+      ErrorHandler.logError('Leaderboard Command', error);
       await interaction.editReply({
         content: 'Произошла ошибка при получении таблицы лидеров. Пожалуйста, попробуйте позже.'
-      });
+      }).catch(() => { });
     }
   }
 };

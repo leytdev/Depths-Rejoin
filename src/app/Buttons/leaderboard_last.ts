@@ -1,10 +1,8 @@
 import { ButtonInteraction } from "discord.js";
 
 export default {
-  data: {
-    name: "leaderboard_last"
-  },
-  async execute(interaction: ButtonInteraction) {
+  customId: "leaderboard_last",
+  async run(interaction: ButtonInteraction) {
     await interaction.deferUpdate();
 
     try {
@@ -14,7 +12,7 @@ export default {
       await interaction.followUp({
         content: `Переход на последнюю страницу. Эта функция будет добавлена позже.`,
         ephemeral: true
-      });
+      }); 
 
     } catch (error) {
       console.error(`Error handling leaderboard_last:`, error);

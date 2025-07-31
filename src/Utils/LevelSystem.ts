@@ -135,24 +135,29 @@ export async function processVoiceState(oldState: VoiceState, newState: VoiceSta
 
   if (oldState.channelId && (!newState.channelId || newState.channel?.name.toLowerCase().includes('afk'))) {
     if (entry.lastVoiceTimestamp) {
-      const timeInVoice = (now.getTime() - entry.lastVoiceTimestamp.getTime()) / (1000 * 60);
+      const timeInVoiceMs = now.getTime() - entry.lastVoiceTimestamp.getTime();
+      const timeInVoiceMin = timeInVoiceMs / (1000 * 60);
+      const timeInVoiceSec = timeInVoiceMs / 1000;
 
       if (
         !oldState.selfMute &&
         !oldState.selfDeaf &&
         oldState.channel &&
-        oldState.channel.members.size > 1 &&
-        timeInVoice >= 1
+        oldState.channel.members.size > 1
       ) {
-        const xpBase = Math.floor(timeInVoice * VOICE_XP_PER_MINUTE);
-        const xpBonus = oldState.streaming ? Math.floor(timeInVoice * STREAM_BONUS_XP_PER_MINUTE) : 0;
+        // Add XP only if they've been in voice for at least 1 minute
+        if (timeInVoiceMin >= 1) {
+          const xpBase = Math.floor(timeInVoiceMin * VOICE_XP_PER_MINUTE);
+          const xpBonus = oldState.streaming ? Math.floor(timeInVoiceMin * STREAM_BONUS_XP_PER_MINUTE) : 0;
 
-        xpEarned = xpBase + xpBonus;
-        await addXP(userId, xpEarned);
-        entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoice);
-      }
+          xpEarned = xpBase + xpBonus;
+          await addXP(userId, xpEarned);
+        }
 
-      // Сбрасываем метку времени, так как пользователь вышел
+        // Always update voice time in seconds, even for short sessions
+        entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoiceSec);
+        console.log(`[VOICE] User ${userId} spent ${Math.floor(timeInVoiceSec)} seconds in voice`);
+      }      // Сбрасываем метку времени, так как пользователь вышел
       entry.lastVoiceTimestamp = undefined;
     }
   }
@@ -182,17 +187,20 @@ export async function processVoiceState(oldState: VoiceState, newState: VoiceSta
     ) {
 
       if (entry.lastVoiceTimestamp) {
-        const timeInVoice = (now.getTime() - entry.lastVoiceTimestamp.getTime()) / (1000 * 60);
+        const timeInVoiceMs = now.getTime() - entry.lastVoiceTimestamp.getTime();
+        const timeInVoiceMin = timeInVoiceMs / (1000 * 60);
+        const timeInVoiceSec = timeInVoiceMs / 1000;
 
-        if (timeInVoice >= 1) {
-          const xpBase = Math.floor(timeInVoice * VOICE_XP_PER_MINUTE);
-          const xpBonus = oldState.streaming ? Math.floor(timeInVoice * STREAM_BONUS_XP_PER_MINUTE) : 0;
+        // Always update voice time in seconds, even for short sessions
+        entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoiceSec);
+        console.log(`[VOICE] User ${userId} spent ${Math.floor(timeInVoiceSec)} seconds in voice (mute/deaf change)`);
+
+        if (timeInVoiceMin >= 1) {
+          const xpBase = Math.floor(timeInVoiceMin * VOICE_XP_PER_MINUTE);
+          const xpBonus = oldState.streaming ? Math.floor(timeInVoiceMin * STREAM_BONUS_XP_PER_MINUTE) : 0;
 
           xpEarned = xpBase + xpBonus;
           await addXP(userId, xpEarned);
-
-
-          entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoice);
         }
 
         entry.lastVoiceTimestamp = undefined;
@@ -213,19 +221,24 @@ export async function processVoiceState(oldState: VoiceState, newState: VoiceSta
       // Если начал стримить, просто продолжаем отсчет, бонус будет учтен при выходе
       // Если прекратил стримить, начисляем XP с бонусом за предыдущее время
       if (oldState.streaming && !newState.streaming && entry.lastVoiceTimestamp) {
-        const timeInVoice = (now.getTime() - entry.lastVoiceTimestamp.getTime()) / (1000 * 60);
+        const timeInVoiceMs = now.getTime() - entry.lastVoiceTimestamp.getTime();
+        const timeInVoiceMin = timeInVoiceMs / (1000 * 60);
+        const timeInVoiceSec = timeInVoiceMs / 1000;
 
-        if (timeInVoice >= 1) {
-          const xpBase = Math.floor(timeInVoice * VOICE_XP_PER_MINUTE);
-          const xpBonus = Math.floor(timeInVoice * STREAM_BONUS_XP_PER_MINUTE);
+        // Always update voice time in seconds, even for short sessions
+        entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoiceSec);
+        console.log(`[VOICE] User ${userId} spent ${Math.floor(timeInVoiceSec)} seconds in voice (streaming change)`);
+
+        if (timeInVoiceMin >= 1) {
+          const xpBase = Math.floor(timeInVoiceMin * VOICE_XP_PER_MINUTE);
+          const xpBonus = Math.floor(timeInVoiceMin * STREAM_BONUS_XP_PER_MINUTE);
 
           xpEarned = xpBase + xpBonus;
           await addXP(userId, xpEarned);
-
-          // Обновляем счетчик времени и устанавливаем новую метку без бонуса за стрим
-          entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoice);
-          entry.lastVoiceTimestamp = now;
         }
+
+        // Устанавливаем новую метку без бонуса за стрим
+        entry.lastVoiceTimestamp = now;
       }
     }
   }
@@ -504,13 +517,204 @@ export async function getUserLevel(userId: string): Promise<{
 }
 
 /**
- * Получает топ пользователей по уровню
+ * Получает топ пользователей по различным критериям
+ * @param sortBy Критерий сортировки: 'xp', 'level', 'messages', 'voice', 'balance'
+ * @param limit Ограничение количества пользователей
  */
-export async function getLevelLeaderboard(limit: number = 10): Promise<Array<{ userId: string; level: number; xp: number }>> {
-  const leaders = await LevelModel.find({})
-    .sort({ xp: -1 })
-    .limit(limit)
-    .select('UID level xp');
+export async function getLevelLeaderboard(
+  limit: number = 10,
+  sortBy: 'xp' | 'level' | 'messages' | 'voice' | 'balance' = 'xp'
+): Promise<Array<{ userId: string; level: number; xp: number }>> {
+  let leaders;
+
+  // Сортировка по различным критериям
+  switch (sortBy) {
+    case 'xp':
+      leaders = await LevelModel.find({})
+        .sort({ xp: -1 })
+        .limit(limit)
+        .select('UID level xp');
+      break;
+
+    case 'level':
+      leaders = await LevelModel.find({})
+        .sort({ level: -1, xp: -1 }) // Если уровни равны, смотрим на опыт
+        .limit(limit)
+        .select('UID level xp');
+      break;
+
+    case 'messages':
+      // Для сортировки по сообщениям
+      leaders = await LevelModel.find({})
+        .sort({ dailyMessageCount: -1 })
+        .limit(limit)
+        .select('UID level xp dailyMessageCount');
+      break;
+
+    case 'voice':
+      // Для сортировки по времени в голосе
+      leaders = await LevelModel.find({})
+        .sort({ voiceTimeToday: -1 })
+        .limit(limit)
+        .select('UID level xp voiceTimeToday');
+      break;
+
+    case 'balance':
+      // Для сортировки по балансу нам нужно использовать агрегацию с BalanceModel
+      try {
+        const { BalanceModel } = require('../schema/BalanceSchema');
+        // Получаем всех пользователей с балансами
+        const balances = await BalanceModel.find({})
+          .sort({ balance: -1 })
+          .limit(limit)
+          .select('UID balance');
+
+        // Затем для каждого получаем данные уровня
+        const userIds = balances.map(b => b.UID);
+        const levels = await LevelModel.find({ UID: { $in: userIds } })
+          .select('UID level xp');
+
+        const levelMap = new Map(levels.map(l => [l.UID, { level: l.level, xp: l.xp }]));
+
+        // Строим результат в порядке балансов
+        leaders = balances.map(balance => ({
+          UID: balance.UID,
+          level: levelMap.get(balance.UID)?.level || 1,
+          xp: levelMap.get(balance.UID)?.xp || 0,
+          balance: balance.balance
+        }));
+
+        if (leaders.length < limit) {
+          // Если не хватает пользователей с балансами, дополняем из LevelModel
+          const remainingCount = limit - leaders.length;
+          const existingIds = new Set(leaders.map(l => l.UID));
+
+          const additionalUsers = await LevelModel.find({ UID: { $nin: Array.from(existingIds) } })
+            .sort({ xp: -1 })
+            .limit(remainingCount)
+            .select('UID level xp');
+
+          leaders = [...leaders, ...additionalUsers];
+        }
+      } catch (error) {
+        console.error("Error sorting by balance:", error);
+        // В случае ошибки возвращаем сортировку по опыту
+        leaders = await LevelModel.find({})
+          .sort({ xp: -1 })
+          .limit(limit)
+          .select('UID level xp');
+      }
+      break;
+
+    default:
+      // По умолчанию сортируем по XP
+      leaders = await LevelModel.find({})
+        .sort({ xp: -1 })
+        .limit(limit)
+        .select('UID level xp');
+  }
+
+  return leaders.map(leader => ({
+    userId: leader.UID,
+    level: leader.level,
+    xp: leader.xp
+  }));
+}
+
+/**
+ * Получает топ пользователей по различным критериям с поддержкой пагинации
+ * @param limit Ограничение количества пользователей
+ * @param sortBy Критерий сортировки: 'xp', 'level', 'messages', 'voice', 'balance'
+ * @param skip Количество пользователей для пропуска (для пагинации)
+ */
+export async function getLevelLeaderboardPaginated(
+  limit: number = 10,
+  sortBy: 'xp' | 'level' | 'messages' | 'voice' | 'balance' = 'xp',
+  skip: number = 0
+): Promise<Array<{ userId: string; level: number; xp: number }>> {
+  let leaders;
+
+  // Сортировка по различным критериям
+  switch (sortBy) {
+    case 'xp':
+      leaders = await LevelModel.find({})
+        .sort({ xp: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select('UID level xp');
+      break;
+
+    case 'level':
+      leaders = await LevelModel.find({})
+        .sort({ level: -1, xp: -1 }) // Если уровни равны, смотрим на опыт
+        .skip(skip)
+        .limit(limit)
+        .select('UID level xp');
+      break;
+
+    case 'messages':
+      // Для сортировки по сообщениям
+      leaders = await LevelModel.find({})
+        .sort({ dailyMessageCount: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select('UID level xp dailyMessageCount');
+      break;
+
+    case 'voice':
+      // Для сортировки по времени в голосе
+      leaders = await LevelModel.find({})
+        .sort({ voiceTimeToday: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select('UID level xp voiceTimeToday');
+      break;
+
+    case 'balance':
+      // Для сортировки по балансу нам нужно использовать агрегацию с BalanceModel
+      try {
+        const { BalanceModel } = require('../schema/BalanceSchema');
+        // Получаем всех пользователей с балансами
+        const balances = await BalanceModel.find({})
+          .sort({ balance: -1 })
+          .skip(skip)
+          .limit(limit)
+          .select('UID balance');
+
+        // Затем для каждого получаем данные уровня
+        const userIds = balances.map((b: { UID: string }) => b.UID);
+        const levels = await LevelModel.find({ UID: { $in: userIds } })
+          .select('UID level xp');
+
+        const levelMap = new Map(levels.map((l: { UID: string, level: number, xp: number }) =>
+          [l.UID, { level: l.level, xp: l.xp }]));
+
+        // Строим результат в порядке балансов
+        leaders = balances.map((balance: { UID: string, balance: number }) => ({
+          UID: balance.UID,
+          level: levelMap.get(balance.UID)?.level || 1,
+          xp: levelMap.get(balance.UID)?.xp || 0,
+          balance: balance.balance
+        }));
+      } catch (error) {
+        console.error("Error sorting by balance:", error);
+        // В случае ошибки возвращаем сортировку по опыту
+        leaders = await LevelModel.find({})
+          .sort({ xp: -1 })
+          .skip(skip)
+          .limit(limit)
+          .select('UID level xp');
+      }
+      break;
+
+    default:
+      // По умолчанию сортируем по XP
+      leaders = await LevelModel.find({})
+        .sort({ xp: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select('UID level xp');
+  }
 
   return leaders.map(leader => ({
     userId: leader.UID,

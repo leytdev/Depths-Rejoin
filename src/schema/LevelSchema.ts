@@ -9,7 +9,7 @@ export interface ILevel extends Document {
   lastDailyTimestamp?: Date;         // Время последнего получения ежедневного бонуса
   messageFrequency: number;          // Количество сообщений в минуту (для анти-спама)
   lastVoiceTimestamp?: Date;         // Время последнего учета голосовой активности
-  voiceTimeToday: number;            // Время проведенное в голосовом канале за день (в минутах)
+  voiceTimeToday: number;            // Время проведенное в голосовом канале за день (в секундах)
   referrals: string[];               // Список ID пользователей, приглашенных этим пользователем
   monthlyReferrals: number;          // Количество рефералов за текущий месяц
   monthlyReferralReset?: Date;       // Дата сброса счетчика ежемесячных рефералов

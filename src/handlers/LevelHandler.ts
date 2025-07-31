@@ -230,10 +230,26 @@ export class LevelHandler {
     if (newState.member?.user.bot) return;
 
     try {
+      // Log voice channel join/leave events for debugging
+      if (oldState.channelId && !newState.channelId) {
+        console.log(`[VOICE-DEBUG] User ${newState.member?.user.username || 'Unknown'} (${newState.id}) left voice channel ${oldState.channel?.name || 'Unknown'}`);
+      } else if (!oldState.channelId && newState.channelId) {
+        console.log(`[VOICE-DEBUG] User ${newState.member?.user.username || 'Unknown'} (${newState.id}) joined voice channel ${newState.channel?.name || 'Unknown'}`);
+      }
+
       const xpGained = await processVoiceState(oldState, newState);
 
       if (xpGained > 0 && newState.member) {
         const { oldLevel, newLevel } = await this.checkLevelUp(newState.id, newState.member);
+        if (newLevel > oldLevel) {
+          console.log(`[VOICE-DEBUG] User ${newState.member.user.username} leveled up from ${oldLevel} to ${newLevel} from voice activity`);
+        }
+      }
+
+      // Check voice time stats after processing
+      if (oldState.channelId && !newState.channelId) {
+        const entry = await ensureLevelEntry(newState.id);
+        console.log(`[VOICE-DEBUG] User ${newState.member?.user.username || 'Unknown'} has accumulated ${entry.voiceTimeToday} seconds in voice today`);
       }
     } catch (error) {
       console.error('Error processing voice state for XP:', error);
@@ -244,9 +260,9 @@ export class LevelHandler {
    * Запускает периодическую проверку пользователей в голосовых каналах
    */
   private startVoiceCheckInterval() {
-    // Проверяем каждые 5 минут
-    this.voiceCheckInterval = setInterval(() => this.checkActiveVoiceUsers(), 5 * 60 * 1000);
-    console.log('[LEVELS-DEBUG] Voice check interval started');
+    // Проверяем каждую минуту для более точного отслеживания времени в голосовых каналах
+    this.voiceCheckInterval = setInterval(() => this.checkActiveVoiceUsers(), 60 * 1000);
+    console.log('[LEVELS-DEBUG] Voice check interval started - checking every minute');
   }
 
   /**
@@ -295,22 +311,28 @@ export class LevelHandler {
                 continue;
               }
 
-              // Рассчитываем время в канале и начисляем XP
-              const timeInVoice = (now.getTime() - entry.lastVoiceTimestamp.getTime()) / (1000 * 60);
-              if (timeInVoice >= 5) { // Начисляем XP только если прошло не менее 5 минут
-                const xpBase = Math.floor(timeInVoice * 1); // 1 XP за минуту
-                const xpBonus = member.voice.streaming ? Math.floor(timeInVoice * 0.5) : 0; // +0.5 XP/мин за стрим
+              // Рассчитываем время в канале
+              const timeInVoiceMs = now.getTime() - entry.lastVoiceTimestamp.getTime();
+              const timeInVoiceMin = timeInVoiceMs / (1000 * 60);
+              const timeInVoiceSec = timeInVoiceMs / 1000;
+
+              // Always update the voice time in seconds, even for short sessions
+              entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoiceSec);
+              entry.lastVoiceTimestamp = now;
+
+              // Only give XP if they've been in voice for at least 5 minutes
+              if (timeInVoiceMin >= 5) {
+                const xpBase = Math.floor(timeInVoiceMin * 1); // 1 XP за минуту
+                const xpBonus = member.voice.streaming ? Math.floor(timeInVoiceMin * 0.5) : 0; // +0.5 XP/мин за стрим
 
                 const xpEarned = xpBase + xpBonus;
                 await addXP(member.id, xpEarned);
 
-                // Обновляем счетчик времени и устанавливаем новую метку
-                entry.voiceTimeToday = (entry.voiceTimeToday || 0) + Math.floor(timeInVoice);
-                entry.lastVoiceTimestamp = now;
-                await entry.save();
-
-                console.log(`[LEVELS-DEBUG] User ${member.user.username} earned ${xpEarned} XP for ${timeInVoice.toFixed(1)} minutes in voice`);
+                console.log(`[LEVELS-DEBUG] User ${member.user.username} earned ${xpEarned} XP for ${timeInVoiceMin.toFixed(1)} minutes in voice`);
               }
+
+              await entry.save();
+              console.log(`[VOICE] User ${member.user.username} has accumulated ${entry.voiceTimeToday} seconds in voice today`);
             }
           }
         }
